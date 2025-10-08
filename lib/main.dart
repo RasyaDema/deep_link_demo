@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:app_links/app_links.dart';
 import 'dart:async';
+import 'package:flutter/widgets.dart';
 
 void main() => runApp(MyApp());
 
@@ -10,9 +11,10 @@ class MyApp extends StatefulWidget {
 }
 
 class _MyAppState extends State<MyApp> {
-  StreamSubscription? _sub;
+  StreamSubscription<Uri>? _sub;
   String _status = 'Waiting for link...';
-  final AppLinks _appLinks = AppLinks();
+  final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
+  String? _pendingId;
 
   @override
   void initState() {
@@ -21,33 +23,25 @@ class _MyAppState extends State<MyApp> {
   }
 
   Future<void> initAppLinks() async {
-    // 1) Handle initial link (cold start)
+    final appLinks = AppLinks();
+
+    // 1️⃣ Handle initial link (app cold start)
     try {
-      final dynamic initialLink = await _appLinks.getInitialAppLink();
-      if (initialLink != null) {
-        if (initialLink is Uri) {
-          _handleIncomingLink(initialLink);
-        } else if (initialLink is String) {
-          _handleIncomingLinkFromString(initialLink);
-        }
-      }
+      final initialUri = await appLinks.getInitialAppLink();
+      if (initialUri != null) _handleIncomingLink(initialUri);
     } catch (err) {
       setState(() => _status = 'Failed to get initial link: $err');
     }
 
-    // 2) Handle links while the app is running
-    try {
-      _sub = _appLinks.uriLinkStream.listen(
-        (uri) {
-          _handleIncomingLink(uri);
-        },
-        onError: (err) {
-          setState(() => _status = 'Failed to receive link: $err');
-        },
-      );
-    } catch (err) {
-      setState(() => _status = 'Failed to subscribe to link stream: $err');
-    }
+    // 2️⃣ Handle link while app is running
+    _sub = AppLinks().uriLinkStream.listen(
+      (Uri uri) {
+        _handleIncomingLink(uri);
+      },
+      onError: (err) {
+        setState(() => _status = 'Failed to receive link: $err');
+      },
+    );
   }
 
   void _handleIncomingLink(Uri uri) {
@@ -56,20 +50,30 @@ class _MyAppState extends State<MyApp> {
     if (uri.host == 'details') {
       // Example link: myapp://details/42
       final id = uri.pathSegments.isNotEmpty ? uri.pathSegments[0] : 'unknown';
-      Navigator.push(
-        context,
-        MaterialPageRoute(builder: (context) => DetailScreen(id: id)),
-      );
+      _navigateToDetail(id);
     }
   }
 
-  void _handleIncomingLinkFromString(String link) {
-    try {
-      final uri = Uri.parse(link);
-      _handleIncomingLink(uri);
-    } catch (err) {
-      setState(() => _status = 'Bad link received: $link');
+  void _navigateToDetail(String id) {
+    // Try to use the navigator key. If the navigator isn't ready yet
+    // (link arrived early, e.g. during startup), save the id and try
+    // again after the first frame.
+    final nav = _navigatorKey.currentState;
+    if (nav != null) {
+      nav.push(MaterialPageRoute(builder: (_) => DetailScreen(id: id)));
+      return;
     }
+
+    _pendingId = id;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final nav2 = _navigatorKey.currentState;
+      if (nav2 != null && _pendingId != null) {
+        nav2.push(
+          MaterialPageRoute(builder: (_) => DetailScreen(id: _pendingId!)),
+        );
+        _pendingId = null;
+      }
+    });
   }
 
   @override
@@ -82,6 +86,7 @@ class _MyAppState extends State<MyApp> {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Deep Link Demo',
+      navigatorKey: _navigatorKey,
       home: Scaffold(
         appBar: AppBar(title: Text('Home')),
         body: Center(child: Text(_status)),
